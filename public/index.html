@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="de-CH">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f5c4d">
+<title>Grundversicherung</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <div class="login-card">
+    <div class="logo">gvv</div>
+    <h1>Grundversicherung</h1>
+    <p>Jährlicher Prämienvergleich mit Wechselvorschlag für den Haushalt.</p>
+    <a class="btn primary" href="/auth/login">Mit Google anmelden</a>
+    <p id="loginMsg" class="muted"></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header class="top">
+    <div class="brand"><span class="logo sm">gvv</span><span>Grundversicherung</span></div>
+    <label class="year"><span class="lbl">Prämienjahr</span> <select id="yearSel"></select></label>
+  </header>
+  <div id="status" class="status"></div>
+  <nav class="tabs">
+    <button data-tab="overview" class="active">Übersicht</button>
+    <button data-tab="persons">Personen</button>
+    <button data-tab="settings">Einstellungen</button>
+  </nav>
+
+  <main>
+    <section id="tab-overview"></section>
+    <section id="tab-persons" hidden></section>
+    <section id="tab-settings" hidden>
+      <div class="card">
+        <h2>Erinnerungen</h2>
+        <p id="pushState" class="muted"></p>
+        <p id="pushHint" class="hint" hidden></p>
+        <div class="row">
+          <button id="pushOn" class="btn primary">Push aktivieren</button>
+          <button id="pushOff" class="btn" hidden>Push beenden</button>
+          <button id="pushTest" class="btn">Test</button>
+        </div>
+        <p class="muted small">Erinnert an die Frist Ende November und ans Nachfassen im Dezember, solange etwas offen ist.</p>
+      </div>
+      <div class="card">
+        <h2>Vorschlag</h2>
+        <label>Wechsel vorschlagen ab einer Ersparnis von CHF pro Jahr
+          <input id="threshold" type="number" min="0" max="5000" step="10"></label>
+        <h3>Haushaltsadresse</h3>
+        <p class="muted small">Absender auf den Briefen, wenn bei der Person keine eigene Adresse steht.</p>
+        <div class="grid3">
+          <label>Strasse <input id="hhStrasse" maxlength="100"></label>
+          <label>PLZ <input id="hhPlz" maxlength="4" inputmode="numeric"></label>
+          <label>Ort <input id="hhOrt" maxlength="60"></label>
+        </div>
+        <button id="saveSettings" class="btn primary">Speichern</button>
+      </div>
+      <div class="card">
+        <h2>Adressen der Kassen</h2>
+        <p class="muted small">Für Kündigungen gilt oft eine andere Postadresse als der Hauptsitz aus dem BAG-Verzeichnis. Hier einmal korrigieren, dann steht sie auf allen Briefen.</p>
+        <label>Kasse <select id="insSel"></select></label>
+        <div id="insEdit" hidden>
+          <p id="insBag" class="muted small"></p>
+          <label>Adresse für Briefe (eine Zeile pro Adresszeile)
+            <textarea id="insAddr" rows="5" maxlength="400"></textarea></label>
+          <label>Link zum Online-Antrag
+            <input id="insUrl" type="url" placeholder="https://" maxlength="300"></label>
+          <button id="saveIns" class="btn primary">Speichern</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Prämiendaten</h2>
+        <p id="dataInfo" class="muted"></p>
+        <button id="importBtn" class="btn">Jetzt beim BAG prüfen</button>
+        <p class="muted small">Quelle: offizielle Prämiendaten des Bundesamts für Gesundheit (opendata.swiss, priminfo.admin.ch). Das Tool prüft jede Nacht, ob neue Daten da sind.</p>
+      </div>
+      <div class="card">
+        <p id="whoami" class="muted"></p>
+        <button id="logout" class="btn">Abmelden</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-head"><h2 id="sheetTitle"></h2><button class="btn ghost" id="sheetClose" aria-label="Schliessen">Schliessen</button></div>
+    <div id="sheetBody"></div>
+  </div>
+</div>
+<div id="toast" class="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
