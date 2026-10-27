@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS subs (endpoint TEXT PRIMARY KEY, user TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS push_sent (key TEXT PRIMARY KEY, at TEXT);
 `);
 const q = (sql) => db.prepare(sql);
+// Mandanten: jede Person gehört dem Benutzer, der sie erfasst hat
+if (!db.prepare("SELECT 1 FROM pragma_table_info('persons') WHERE name='owner'").get()) db.exec('ALTER TABLE persons ADD COLUMN owner TEXT');
+db.exec("UPDATE persons SET owner=created_by WHERE owner IS NULL AND created_by IS NOT NULL; CREATE INDEX IF NOT EXISTS persons_owner ON persons(owner, sort)");
+{ const n = db.prepare('SELECT count(*) AS n FROM persons WHERE owner IS NULL').get().n; if (n) console.warn(`WARNUNG: ${n} Person(en) ohne Besitzer, für niemanden sichtbar.`); }
 const meta = {
   get: (k, d) => { const r = q('SELECT v FROM meta WHERE k=?').get(k); return r ? r.v : d; },
   set: (k, v) => q('INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').run(k, String(v)),
@@ -69,9 +73,11 @@ const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const fromB64u = (s) => Buffer.from(s, 'base64url');
 const VAPID_PUBLIC = (() => { const j = JSON.parse(vapidJwk); return b64u(Buffer.concat([Buffer.from([4]), fromB64u(j.x), fromB64u(j.y)])); })();
 
-const settings = () => {
+// Einstellungen pro Benutzer. Von früheren globalen Einstellungen wird nur die Schwelle übernommen, keine Adresse.
+const settings = (user) => {
   const d = { threshold: 120, household: { strasse: '', plz: '', ort: '' } };
-  try { return { ...d, ...JSON.parse(meta.get('settings', '{}')) }; } catch { return d; }
+  try { d.threshold = JSON.parse(meta.get('settings', '{}')).threshold ?? d.threshold; } catch {}
+  try { return { ...d, ...JSON.parse(meta.get('settings:' + user, '{}')) }; } catch { return d; }
 };
 
 // ---------- Zeit ----------
@@ -90,8 +96,9 @@ const years = () => q('SELECT DISTINCT year FROM premiums ORDER BY year DESC').a
 const latestYear = () => years()[0] || null;
 const insurerRow = (nr) => q('SELECT * FROM insurers WHERE nr=?').get(nr);
 const insurerShort = (nr) => insurerRow(nr)?.short || `Versicherer ${nr}`;
-const loadPersons = () => q('SELECT * FROM persons ORDER BY sort, id').all().map(r => ({ id: r.id, ...JSON.parse(r.data) }));
-const loadPerson = (id) => { const r = q('SELECT * FROM persons WHERE id=?').get(id); return r ? { id: r.id, ...JSON.parse(r.data) } : null; };
+const personRow = (r) => ({ ...JSON.parse(r.data), id: r.id, owner: r.owner });
+const loadPersons = (user) => q('SELECT * FROM persons WHERE owner=? ORDER BY sort, id').all(String(user)).map(personRow);
+const loadPerson = (id, user) => { const r = q('SELECT * FROM persons WHERE id=? AND owner=?').get(id, String(user)); return r ? personRow(r) : null; };
 const loadCase = (year, pid) => { const r = q('SELECT * FROM cases WHERE year=? AND person_id=?').get(year, pid); return r ? { ...JSON.parse(r.data), updated_by: r.updated_by, updated_at: r.updated_at } : null; };
 const saveCase = (year, pid, data, user) => q('INSERT INTO cases(year,person_id,data,updated_by,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(year,person_id) DO UPDATE SET data=excluded.data, updated_by=excluded.updated_by, updated_at=excluded.updated_at')
   .run(year, pid, JSON.stringify(data), user, new Date().toISOString());
@@ -152,7 +159,7 @@ function compare(p, year, limit = 15) {
     out.savingsMonthly = Math.round((out.current.monthly - best.monthly) * 100) / 100;
     out.savingsYearly = Math.round(out.savingsMonthly * 12 * 100) / 100;
     const same = best.insurer === out.current.insurer && best.tariff === out.current.tariff;
-    out.recommendation = same || out.savingsYearly < settings().threshold ? 'bleiben' : 'wechseln';
+    out.recommendation = same || out.savingsYearly < settings(p.owner).threshold ? 'bleiben' : 'wechseln';
     out.sameInsurer = best.insurer === out.current.insurer;
   } else out.recommendation = out.current ? 'bleiben' : 'unvollständig';
   return out;
@@ -267,23 +274,23 @@ async function api(req, res, user, route, url) {
   if (route === 'state' && m === 'GET') {
     const ys = years();
     return send(res, 200, {
-      user, userName: USER_NAMES[user] || user, users: Object.keys(USERS).map(u => ({ id: u, name: USER_NAMES[u] || u })),
+      user, userName: USER_NAMES[user] || user, users: [{ id: user, name: USER_NAMES[user] || user }],
       years: ys, latestYear: ys[0] || null, imported: ys[0] ? meta.get('import_' + ys[0]) : null, importState,
-      settings: settings(), modelTypes: MODEL_TYPES, vapidPublicKey: VAPID_PUBLIC, today: localNow().date,
+      settings: settings(user), modelTypes: MODEL_TYPES, vapidPublicKey: VAPID_PUBLIC, today: localNow().date,
       insurers: q('SELECT nr, short FROM insurers ORDER BY short COLLATE NOCASE').all(),
-      persons: loadPersons(),
+      persons: loadPersons(user),
     });
   }
   if (route === 'overview' && m === 'GET') {
     if (!yr) return send(res, 200, { year: null, persons: [] });
-    const persons = loadPersons().map(p => {
+    const persons = loadPersons(user).map(p => {
       const c = compare(p, yr, 3);
       return { person: p, cmp: { problems: c.problems, current: c.current, best: c.best, savingsYearly: c.savingsYearly, recommendation: c.recommendation, region: c.region, ageGroup: c.ageGroup, currentRank: c.currentRank, matchingOffers: c.matchingOffers }, case: caseView(p, yr) };
     });
     return send(res, 200, { year: yr, deadline: deadlineFor(yr), daysLeft: daysUntil(deadlineFor(yr)), persons });
   }
   if (route === 'compare' && m === 'GET') {
-    const p = loadPerson(int(url.searchParams.get('person'), 1, 1e9)); if (!p) return send(res, 404, { error: 'Person nicht gefunden' });
+    const p = loadPerson(int(url.searchParams.get('person'), 1, 1e9), user); if (!p) return send(res, 404, { error: 'Person nicht gefunden' });
     return send(res, 200, { ...compare(p, yr, int(url.searchParams.get('limit'), 1, 200) || 15), case: caseView(p, yr), personData: p });
   }
   if (route === 'gemeinden' && m === 'GET') {
@@ -311,28 +318,29 @@ async function api(req, res, user, route, url) {
     const id = int(b.id, 1, 1e9);
     try {
       if (id) {
-        const old = loadPerson(id); if (!old) return send(res, 404, { error: 'Person nicht gefunden' });
-        const { id: _, ...rest } = old;
+        const old = loadPerson(id, user); if (!old) return send(res, 404, { error: 'Person nicht gefunden' });
+        const { id: _, owner: __, ...rest } = old;
         const p = cleanPerson(b, rest);
-        q('UPDATE persons SET data=?, updated_at=? WHERE id=?').run(JSON.stringify(p), new Date().toISOString(), id);
+        q('UPDATE persons SET data=?, updated_at=? WHERE id=? AND owner=?').run(JSON.stringify(p), new Date().toISOString(), id, user);
         addHistory(id, user, 'Angaben geändert');
         return send(res, 200, { ok: true, id });
       }
       const p = cleanPerson(b);
-      const sort = (q('SELECT max(sort) AS s FROM persons').get().s || 0) + 1;
-      const r = q('INSERT INTO persons(data,sort,created_by,created_at,updated_at) VALUES(?,?,?,?,?)').run(JSON.stringify(p), sort, user, new Date().toISOString(), new Date().toISOString());
+      const sort = (q('SELECT max(sort) AS s FROM persons WHERE owner=?').get(user).s || 0) + 1;
+      const r = q('INSERT INTO persons(data,sort,owner,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(JSON.stringify(p), sort, user, user, new Date().toISOString(), new Date().toISOString());
       addHistory(Number(r.lastInsertRowid), user, 'Person erfasst');
       return send(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
     } catch (e) { return send(res, 400, { error: e.message }); }
   }
   if (route.startsWith('persons/') && m === 'DELETE') {
     const id = int(route.split('/')[1], 1, 1e9); if (!id) return send(res, 400, { error: 'ID fehlt' });
+    if (!loadPerson(id, user)) return send(res, 404, { error: 'Person nicht gefunden' });
     q('DELETE FROM cases WHERE person_id=?').run(id); q('DELETE FROM persons WHERE id=?').run(id); q('DELETE FROM history WHERE person_id=?').run(id);
     return send(res, 200, { ok: true });
   }
   if (route === 'decision' && m === 'POST') {
     const b = await readBody(req);
-    const p = loadPerson(int(b.person, 1, 1e9)); const year = int(b.year, 2000, 2100);
+    const p = loadPerson(int(b.person, 1, 1e9), user); const year = int(b.year, 2000, 2100);
     if (!p || !year) return send(res, 400, { error: 'Person oder Jahr fehlt' });
     const c = loadCase(year, p.id) || {};
     if (c.steps && Object.values(c.steps).some(s => s.done) && !b.force) return send(res, 409, { error: 'Es sind schon Schritte erledigt. Entscheid trotzdem ändern?' });
@@ -351,7 +359,7 @@ async function api(req, res, user, route, url) {
   }
   if (route === 'step' && m === 'POST') {
     const b = await readBody(req);
-    const p = loadPerson(int(b.person, 1, 1e9)); const year = int(b.year, 2000, 2100);
+    const p = loadPerson(int(b.person, 1, 1e9), user); const year = int(b.year, 2000, 2100);
     if (!p || !year) return send(res, 400, { error: 'Person oder Jahr fehlt' });
     const c = loadCase(year, p.id); if (!c?.decision || c.decision.stay) return send(res, 400, { error: 'Kein Wechsel entschieden' });
     const keys = stepsFor(c.decision, p).map(s => s.key); const key = str(b.key, 30);
@@ -362,10 +370,10 @@ async function api(req, res, user, route, url) {
     let applied = false;
     // Ist alles erledigt, gilt die neue Kasse als aktuelle Versicherung der Person
     if (keys.every(k => c.steps[k]?.done) && !c.applied) {
-      const { id, ...rest } = p;
+      const { id, owner, ...rest } = p;
       if (+rest.versicherer !== +c.decision.insurer) rest.versichertenNr = ''; // neue Nummer steht auf der neuen Police
       rest.versicherer = c.decision.insurer; rest.tarif = c.decision.tariff;
-      q('UPDATE persons SET data=?, updated_at=? WHERE id=?').run(JSON.stringify(rest), new Date().toISOString(), id);
+      q('UPDATE persons SET data=?, updated_at=? WHERE id=? AND owner=?').run(JSON.stringify(rest), new Date().toISOString(), id, user);
       c.applied = true; applied = true;
       addHistory(id, user, `Wechsel ${year} abgeschlossen: neu bei ${c.decision.insurerName} ${c.decision.tariffName}`);
     }
@@ -375,7 +383,7 @@ async function api(req, res, user, route, url) {
   }
   if (route === 'note' && m === 'POST') {
     const b = await readBody(req);
-    const p = loadPerson(int(b.person, 1, 1e9)); const year = int(b.year, 2000, 2100);
+    const p = loadPerson(int(b.person, 1, 1e9), user); const year = int(b.year, 2000, 2100);
     if (!p || !year) return send(res, 400, { error: 'Person oder Jahr fehlt' });
     const c = loadCase(year, p.id) || {}; const { updated_by, updated_at, ...data } = c;
     data.note = str(b.note, 2000); saveCase(year, p.id, data, user);
@@ -394,14 +402,15 @@ async function api(req, res, user, route, url) {
     return send(res, 200, { ok: true });
   }
   if (route === 'settings' && m === 'POST') {
-    const b = await readBody(req); const s = settings();
+    const b = await readBody(req); const s = settings(user);
     const t = int(b.threshold, 0, 5000); if (t != null) s.threshold = t;
     if (b.household) s.household = { strasse: str(b.household.strasse, 100), plz: str(b.household.plz, 4), ort: str(b.household.ort, 60) };
-    meta.set('settings', JSON.stringify(s));
+    meta.set('settings:' + user, JSON.stringify(s));
     return send(res, 200, { ok: true });
   }
   if (route === 'history' && m === 'GET') {
-    return send(res, 200, q('SELECT * FROM history WHERE person_id=? ORDER BY id DESC LIMIT 50').all(int(url.searchParams.get('person'), 1, 1e9)));
+    const hp = loadPerson(int(url.searchParams.get('person'), 1, 1e9), user); if (!hp) return send(res, 404, { error: 'Person nicht gefunden' });
+    return send(res, 200, q('SELECT * FROM history WHERE person_id=? ORDER BY id DESC LIMIT 50').all(hp.id));
   }
   if (route === 'import' && m === 'POST') {
     if (importState.running) return send(res, 200, { ok: true, running: true });
@@ -426,7 +435,7 @@ function printPage(title, body) {
 <div class="noprint bar"><a href="/">Zurück</a><button type="button" id="printBtn">Drucken / als PDF speichern</button></div>${body}<script src="/print.js"></script></body></html>`;
 }
 function senderBlock(p) {
-  const hh = settings().household;
+  const hh = settings(p.owner).household;
   const strasse = p.strasse || hh.strasse, plz = p.plz || hh.plz, ort = p.ort || hh.ort;
   return [`${p.vorname} ${p.nachname}`.trim(), strasse, `${plz} ${ort}`.trim()].filter(Boolean);
 }
@@ -440,7 +449,7 @@ function letterHtml(p, year, kind, d) {
   const target = letterAddress(kind === 'kuendigung' ? (d.fromInsurer ?? p.versicherer) : d.insurer);
   const vnr = d.fromVersichertenNr ?? p.versichertenNr;
   const today = localNow();
-  const place = (p.ort || settings().household.ort || '').trim();
+  const place = (p.ort || settings(p.owner).household.ort || '').trim();
   const who = `${p.vorname} ${p.nachname}`.trim();
   const ident = [p.geburtsdatum ? `geboren am ${fmtDate(p.geburtsdatum)}` : `Jahrgang ${p.jahrgang}`, vnr ? `Versicherten-Nr. ${vnr}` : null].filter(Boolean).join(', ');
   let subject, text;
@@ -489,7 +498,7 @@ ${link ? `<p class="noprint">Antrag online: <a href="${esc(link)}" target="_blan
 <p class="hint">Die Grundversicherung muss jede Person aufnehmen, ohne Gesundheitsfragen. Fragen nach Zusatzversicherungen kann man ablehnen.</p></article>`);
 }
 function printRoute(req, res, url, user) {
-  const p = loadPerson(int(url.searchParams.get('person'), 1, 1e9)); const year = int(url.searchParams.get('year'), 2000, 2100);
+  const p = loadPerson(int(url.searchParams.get('person'), 1, 1e9), user); const year = int(url.searchParams.get('year'), 2000, 2100);
   if (!p || !year) return send(res, 404, 'Nicht gefunden', 'text/plain; charset=utf-8');
   const c = loadCase(year, p.id);
   if (!c?.decision || c.decision.stay) return send(res, 400, 'Für diese Person ist kein Wechsel entschieden.', 'text/plain; charset=utf-8');
@@ -536,12 +545,12 @@ async function pushToUser(user, data) {
   for (const s of q('SELECT * FROM subs WHERE user=?').all(user)) { try { if (await sendPush(s, data)) n++; } catch (e) { console.error('Push-Fehler', e.message); } }
   return n;
 }
-async function pushAll(data) { let n = 0; for (const u of Object.keys(USERS)) n += await pushToUser(u, data); return n; }
-// Jede Erinnerung nur einmal (Schlüssel)
-async function pushOnce(key, data) {
+// Jede Erinnerung nur einmal pro Benutzer (Schlüssel), nur an diesen Benutzer
+async function pushOnce(user, key, data) {
+  key = user + ':' + key;
   if (q('SELECT 1 FROM push_sent WHERE key=?').get(key)) return;
   q('INSERT INTO push_sent(key,at) VALUES(?,?)').run(key, new Date().toISOString());
-  await pushAll(data);
+  await pushToUser(user, data);
 }
 
 // ---------- Import und Erinnerungen ----------
@@ -554,9 +563,11 @@ async function runImport(by = 'auto') {
     const r = await bag.importAll(db, (s) => console.log(s));
     importState.lastResult = r;
     if (before && r.year > before) {
-      const sav = loadPersons().map(p => ({ p, c: compare(p, r.year) })).filter(x => x.c.recommendation === 'wechseln');
-      const body = sav.length ? sav.map(x => `${x.p.vorname}: ${chf(x.c.savingsYearly)} pro Jahr sparen`).join(', ') : 'Kein Wechsel nötig, alle sind schon günstig versichert.';
-      await pushOnce('newyear:' + r.year, { title: `Prämien ${r.year} sind da`, body, tag: 'newyear', url: '/' });
+      for (const u of Object.keys(USERS)) {
+        const sav = loadPersons(u).map(p => ({ p, c: compare(p, r.year) })).filter(x => x.c.recommendation === 'wechseln');
+        const body = sav.length ? sav.map(x => `${x.p.vorname}: ${chf(x.c.savingsYearly)} pro Jahr sparen`).join(', ') : 'Kein Wechsel nötig, alle sind schon günstig versichert.';
+        await pushOnce(u, 'newyear:' + r.year, { title: `Prämien ${r.year} sind da`, body, tag: 'newyear', url: '/' });
+      }
     }
   } catch (e) {
     importState.lastError = e.message; console.error('Import-Fehler', e);
@@ -571,13 +582,14 @@ async function checkForNewData() {
 }
 // Tage, an denen vor der Frist erinnert wird (Oktober/November), danach täglich in der letzten Woche
 const REMIND_DAYS = new Set(['10-15', '11-01', '11-10', '11-17', '11-22', '11-24', '11-25', '11-26', '11-27', '11-28', '11-29', '11-30']);
-async function reminders() {
+async function reminders() { for (const u of Object.keys(USERS)) await remindersFor(u); }
+async function remindersFor(user) {
   const now = localNow(); const md = now.date.slice(5);
   const y = latestYear(); if (!y) return;
   const deadline = deadlineFor(y);
   if (now.date <= deadline && REMIND_DAYS.has(md)) {
     const open = [];
-    for (const p of loadPersons()) {
+    for (const p of loadPersons(user)) {
       const c = caseView(p, y), cmp = compare(p, y);
       if (!c.decision && cmp.recommendation === 'wechseln') open.push(`${p.vorname}: Entscheid offen (${chf(cmp.savingsYearly)} pro Jahr)`);
       else if (c.decision && !c.decision.stay) {
@@ -585,16 +597,16 @@ async function reminders() {
         if (kStep && !kStep.done) open.push(`${p.vorname}: ${kStep.key === 'kuendigung' ? 'Kündigung' : 'Modellwechsel'} noch nicht verschickt`);
       }
     }
-    if (open.length) await pushOnce(`frist:${y}:${now.date}`, { title: `Frist ${fmtDate(deadline)}: noch ${daysUntil(deadline)} Tage`, body: open.join(' · '), tag: 'frist', url: '/' });
+    if (open.length) await pushOnce(user, `frist:${y}:${now.date}`, { title: `Frist ${fmtDate(deadline)}: noch ${daysUntil(deadline)} Tage`, body: open.join(' · '), tag: 'frist', url: '/' });
   }
   if (['12-15', '12-22'].includes(md) && now.year === y - 1) {
     const open = [];
-    for (const p of loadPersons()) {
+    for (const p of loadPersons(user)) {
       const c = caseView(p, y); if (!c.decision || c.decision.stay) continue;
       const s = c.steps.find(x => x.key === 'bestaetigungAlt'); if (s && !s.done && c.steps.find(x => x.key === 'kuendigung')?.done) open.push(`${p.vorname}: Kündigungsbestätigung fehlt noch`);
       const pol = c.steps.find(x => x.key === 'police'); if (pol && !pol.done) open.push(`${p.vorname}: neue Police fehlt noch`);
     }
-    if (open.length) await pushOnce(`nachfassen:${y}:${now.date}`, { title: 'Krankenkasse nachfassen', body: open.join(' · '), tag: 'nachfassen', url: '/' });
+    if (open.length) await pushOnce(user, `nachfassen:${y}:${now.date}`, { title: 'Krankenkasse nachfassen', body: open.join(' · '), tag: 'nachfassen', url: '/' });
   }
 }
 // Einmal pro Tag: um 4 Uhr auf neue BAG-Daten prüfen, ab 9:30 Uhr Erinnerungen (pushOnce verhindert Doppelte)

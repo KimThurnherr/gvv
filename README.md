@@ -12,6 +12,9 @@ obligatorischen Krankenpflegeversicherung (Grundversicherung) und bereitet einen
   Datenblatt für den Antrag bei der neuen Kasse und eine Checkliste bis zur neuen Police.
 - Web-Push-Erinnerungen vor der Kündigungsfrist (30. November) und zum Nachfassen im Dezember.
 - Es wird nichts automatisch verschickt. Briefe druckt und verschickt man selbst.
+- Mandantenfähig: Jeder Benutzer sieht und bearbeitet nur die Personen, die er selbst erfasst hat. Absenderadresse,
+  Wechselschwelle und Erinnerungen gelten ebenfalls pro Benutzer. Gemeinsam sind nur die BAG-Prämiendaten und die
+  hinterlegten Kündigungsadressen der Kassen.
 
 Keine externen Abhängigkeiten (Node 24: `node:http`, `node:sqlite`, `node:crypto`).
 
