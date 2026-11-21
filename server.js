@@ -554,10 +554,10 @@ async function pushOnce(user, key, data) {
 }
 
 // ---------- Import und Erinnerungen ----------
-const importState = { running: false, lastError: null, lastRun: null, lastResult: null };
+const importState = { running: false, lastError: null, sourceDown: false, lastRun: null, lastResult: null };
 async function runImport(by = 'auto') {
   if (importState.running) return;
-  importState.running = true; importState.lastError = null;
+  importState.running = true; importState.lastError = null; importState.sourceDown = false;
   const before = latestYear();
   try {
     const r = await bag.importAll(db, (s) => console.log(s));
@@ -570,15 +570,20 @@ async function runImport(by = 'auto') {
       }
     }
   } catch (e) {
-    importState.lastError = e.message; console.error('Import-Fehler', e);
+    importState.lastError = e.message; importState.sourceDown = !!e.sourceDown; console.error('Import-Fehler', e);
   } finally { importState.running = false; importState.lastRun = new Date().toISOString(); console.log('Import beendet durch', by); }
 }
 async function checkForNewData() {
   if (!AUTO_IMPORT || importState.running) return;
   try {
     const fp = await bag.premiumsFingerprint();
+    // BAG-Server antwortet wieder: eine frühere Ausfallmeldung ist erledigt
+    if (importState.sourceDown) { importState.lastError = null; importState.sourceDown = false; }
     if (!latestYear() || (fp && fp !== meta.get('premiums_fp', ''))) await runImport('auto');
-  } catch (e) { console.error('Prüfung auf neue Prämien fehlgeschlagen', e.message); }
+  } catch (e) {
+    console.error('Prüfung auf neue Prämien fehlgeschlagen', e.message);
+    if (e.sourceDown) { importState.lastError = e.message; importState.sourceDown = true; importState.lastRun = new Date().toISOString(); }
+  }
 }
 // Tage, an denen vor der Frist erinnert wird (Oktober/November), danach täglich in der letzten Woche
 const REMIND_DAYS = new Set(['10-15', '11-01', '11-10', '11-17', '11-22', '11-24', '11-25', '11-26', '11-27', '11-28', '11-29', '11-30']);

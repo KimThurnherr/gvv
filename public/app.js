@@ -267,7 +267,11 @@ function renderSettings() {
   $('threshold').value = st.settings.threshold;
   $('hhStrasse').value = st.settings.household.strasse || ''; $('hhPlz').value = st.settings.household.plz || ''; $('hhOrt').value = st.settings.household.ort || '';
   const is = st.importState;
-  $('dataInfo').textContent = st.latestYear ? `Prämienjahr ${st.latestYear}, geladen am ${fmtDate(st.imported)}.` + (is.running ? ' Aktualisierung läuft …' : '') + (is.lastError ? ' Letzter Fehler: ' + is.lastError : '') : (is.running ? 'Import läuft …' : 'Noch keine Daten.');
+  const srcDown = is.sourceDown && is.lastError;
+  const errTxt = !is.lastError ? '' : srcDown
+    ? ` Der Download-Server des BAG ist im Moment nicht erreichbar (${is.lastError}). ` + (st.latestYear ? `Die geladenen Prämien ${st.latestYear} gelten weiter, die Prüfung wird automatisch wiederholt.` : 'Der Import wird automatisch wiederholt.')
+    : ' Letzter Fehler: ' + is.lastError;
+  $('dataInfo').textContent = st.latestYear ? `Prämienjahr ${st.latestYear}, geladen am ${fmtDate(st.imported)}.` + (is.running ? ' Aktualisierung läuft …' : '') + errTxt : (is.running ? 'Import läuft …' : 'Noch keine Daten.' + errTxt);
   $('importBtn').disabled = is.running;
   if (!$('insSel').options.length) {
     $('insSel').innerHTML = '<option value="">Kasse wählen …</option>' + st.insurers.map(i => `<option value="${i.nr}">${esc(i.short)}</option>`).join('');
